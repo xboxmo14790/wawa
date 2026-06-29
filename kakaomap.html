@@ -43,4 +43,313 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:-apple-system,Blink
 .placeinfo_wrap {position:absolute;bottom:28px;left:-150px;width:300px;}
 .placeinfo {position:relative;width:100%;border-radius:6px;border: 1px solid #ccc;border-bottom:2px solid #ddd;background:#fff;padding:10px;}
 .placeinfo:nth-child(1) {padding:0 0 10px 0;}
-.placeinfo a, .placeinfo a:hover, .placeinfo a:active{color:#fff;text-decoration:none;background:#ff4d4d;padding:8px 10px;display:block;border-radius:6px 6px 0 0;font
+.placeinfo a, .placeinfo a:hover, .placeinfo a:active{color:#fff;text-decoration:none;background:#ff4d4d;padding:8px 10px;display:block;border-radius:6px 6px 0 0;font-weight:bold;}
+.placeinfo span {display:block;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;font-size:12px;padding:4px 10px 0;}
+.placeinfo .jibun {color:#999;}
+.placeinfo .tel {color:#009933;font-weight:bold;}
+.placeinfo_wrap .after {content:'';position:absolute;margin-left:-12px;left:50%;bottom:-12px;width:22px;height:12px;background:url('https://t1.daumcdn.net/localimg/localimages/07/mapapidoc/vertex_white.png')}
+</style>
+</head>
+<body>
+
+<ul id="category">
+  <li id="BK9" data-order="0"><span class="bank"></span>은행</li>
+  <li id="MT1" data-order="1"><span class="mart"></span>마트</li>
+  <li id="PM9" data-order="2"><span class="pharmacy"></span>약국</li>
+  <li id="OL7" data-order="3"><span class="oil"></span>주유소</li>
+  <li id="CE7" data-order="4"><span class="cafe"></span>카페</li>
+  <li id="CS2" data-order="5"><span class="store"></span>편의점</li>
+</ul>
+
+<div id="map"></div>
+<div id="panel">
+  <div id="search-wrap">
+    <input id="q" type="search" placeholder="장소, 주소 검색" autocomplete="off" enterkeyhint="search">
+    <button id="btn">검색</button>
+  </div>
+  <div id="list"></div>
+</div>
+<div id="toast"></div>
+
+<script>
+const JS_KEY = 'de211e1826407558332dcbf72b0a4aee';
+
+let map, ps, infowindow;
+let markers = []; // 키워드 검색용 마커 배열
+let categoryMarkers = []; // 카테고리 검색용 마커 배열
+let currCategory = ''; // 현재 선택된 카테고리 코드
+
+// 카테고리용 커스텀 오버레이 선언
+const placeOverlay = new kakao.maps.CustomOverlay({ zIndex: 1 });
+const contentNode = document.createElement('div');
+
+function initMap() {
+  const defaultLatLng = new kakao.maps.LatLng(37.5665, 126.9780);
+  
+  map = new kakao.maps.Map(document.getElementById('map'), {
+    center: defaultLatLng,
+    level: 5,
+  });
+  map.addControl(new kakao.maps.ZoomControl(), kakao.maps.ControlPosition.RIGHT);
+  
+  ps = new kakao.maps.services.Places(map); 
+  infowindow = new kakao.maps.InfoWindow({ zIndex: 1 });
+
+  // 브라우저 GPS 시도 (HTTPS 환경 전용)
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+      function(position) {
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
+        map.setCenter(new kakao.maps.LatLng(lat, lng));
+        showToast('현재 위치를 가져왔습니다');
+      }, 
+      function(error) {
+        // 에러나 차단 시 콘솔에만 출력하고 조용히 넘어감
+        console.log('Browser Geolocation blocked or failed.');
+      },
+      { enableHighAccuracy: true, timeout: 3000 }
+    );
+  }
+
+  // 지도 조작이 끝났을 때 카테고리 자동 갱신
+  kakao.maps.event.addListener(map, 'idle', searchPlacesFromCategory);
+
+  contentNode.className = 'placeinfo_wrap';
+  addEventHandle(contentNode, 'mousedown', kakao.maps.event.preventMap);
+  addEventHandle(contentNode, 'touchstart', kakao.maps.event.preventMap);
+  placeOverlay.setContent(contentNode);
+
+  addCategoryClickEvent();
+}
+
+/* ================= [기능 1] 키워드 검색 기능 ================= */
+function search() {
+  const keyword = document.getElementById('q').value.trim();
+  if (!keyword) return;
+  if (!ps) { showToast('지도 로딩 중입니다'); return; }
+  
+  currCategory = '';
+  changeCategoryClass();
+  clearCategoryMarkers();
+  placeOverlay.setMap(null);
+  clearMarkers();
+  document.getElementById('list').style.display = 'none';
+  
+  ps.keywordSearch(keyword, handleResult);
+}
+
+function handleResult(data, status) {
+  if (status === kakao.maps.services.Status.OK) {
+    renderList(data);
+  } else if (status === kakao.maps.services.Status.ZERO_RESULT) {
+    const list = document.getElementById('list');
+    list.innerHTML = '<div class="empty">검색 결과가 없습니다</div>';
+    list.style.display = 'block';
+  } else {
+    showToast('검색 중 오류가 발생했습니다');
+  }
+}
+
+function renderList(places) {
+  const list = document.getElementById('list');
+  const bounds = new kakao.maps.LatLngBounds();
+  const frag = document.createDocumentFragment();
+
+  places.forEach((p, i) => {
+    const latlng = new kakao.maps.LatLng(p.y, p.x);
+    createKeywordMarker(p, i);
+    bounds.extend(latlng);
+
+    const el = document.createElement('div');
+    el.className = 'item';
+    el.innerHTML = `<div class="name">${p.place_name}</div><div class="addr">${p.road_address_name || p.address_name}</div>`;
+    el.addEventListener('click', () => {
+      map.setCenter(latlng);
+      map.setLevel(3);
+      kakao.maps.event.trigger(markers[i], 'click');
+      list.style.display = 'none';
+    });
+    frag.appendChild(el);
+  });
+
+  list.innerHTML = '';
+  list.appendChild(frag);
+  list.style.display = 'block';
+  map.setBounds(bounds, 50);
+}
+
+function createKeywordMarker(place, idx) {
+  const pos = new kakao.maps.LatLng(place.y, place.x);
+  const marker = new kakao.maps.Marker({ map, position: pos });
+  kakao.maps.event.addListener(marker, 'click', () => {
+    infowindow.setContent(`<div style="padding:6px 10px;font-size:13px;font-weight:600;max-width:180px">${place.place_name}</div>`);
+    infowindow.open(map, marker);
+  });
+  markers.push(marker);
+}
+
+function clearMarkers() {
+  markers.forEach(m => m.setMap(null));
+  markers = [];
+  if (infowindow) infowindow.close();
+}
+
+
+/* ================= [기능 2] 카테고리 검색 기능 (오류 수정) ================= */
+function searchPlacesFromCategory() {
+  if (!currCategory) return;
+  placeOverlay.setMap(null);
+  clearCategoryMarkers(); // 오류 유발하던 예전 함수명 교체 완료
+  
+  ps.categorySearch(currCategory, categorySearchCB, { useMapBounds: true });
+}
+
+function categorySearchCB(data, status) {
+  if (status === kakao.maps.services.Status.OK) {
+    displayCategoryPlaces(data);
+  }
+}
+
+function displayCategoryPlaces(places) {
+  const order = document.getElementById(currCategory).getAttribute('data-order');
+
+  places.forEach(place => {
+    const marker = addCategoryMarker(new kakao.maps.LatLng(place.y, place.x), order);
+    kakao.maps.event.addListener(marker, 'click', () => {
+      displayPlaceInfo(place);
+    });
+  });
+}
+
+function addCategoryMarker(position, order) {
+  const imageSrc = 'https://t1.daumcdn.net/localimg/localimages/07/mapapidoc/places_category.png';
+  const imageSize = new kakao.maps.Size(27, 28);
+  const imgOptions = {
+    spriteSize: new kakao.maps.Size(72, 208),
+    spriteOrigin: new kakao.maps.Point(46, (order * 36)),
+    offset: new kakao.maps.Point(11, 28)
+  };
+  const markerImage = new kakao.maps.MarkerImage(imageSrc, imageSize, imgOptions);
+  const marker = new kakao.maps.Marker({ position, image: markerImage });
+  
+  marker.setMap(map);
+  categoryMarkers.push(marker);
+  return marker;
+}
+
+function clearCategoryMarkers() {
+  categoryMarkers.forEach(m => m.setMap(null));
+  categoryMarkers = [];
+}
+
+function displayPlaceInfo(place) {
+  let content = `<div class="placeinfo">
+                  <a class="title" href="${place.place_url}" target="_blank" title="${place.place_name}">${place.place_name}</a>`;
+  if (place.road_address_name) {
+    content += `  <span title="${place.road_address_name}">${place.road_address_name}</span>
+                  <span class="jibun" title="${place.address_name}">(지번 : ${place.address_name})</span>`;
+  } else {
+    content += `  <span title="${place.address_name}">${place.address_name}</span>`;
+  }
+  content += `    <span class="tel">${place.phone || '전화번호 없음'}</span>
+                </div>
+                <div class="after"></div>`;
+
+  contentNode.innerHTML = content;
+  placeOverlay.setPosition(new kakao.maps.LatLng(place.y, place.x));
+  placeOverlay.setMap(map);
+}
+
+function addCategoryClickEvent() {
+  const category = document.getElementById('category');
+  const children = category.children;
+  for (let i = 0; i < children.length; i++) {
+    children[i].onclick = onClickCategory;
+  }
+}
+
+function onClickCategory() {
+  const id = this.id;
+  const className = this.className;
+
+  placeOverlay.setMap(null);
+  clearMarkers();
+  document.getElementById('list').style.display = 'none';
+
+  if (className === 'on') {
+    currCategory = '';
+    changeCategoryClass();
+    clearCategoryMarkers();
+  } else {
+    currCategory = id;
+    changeCategoryClass(this);
+    searchPlacesFromCategory();
+  }
+}
+
+function changeCategoryClass(el) {
+  const category = document.getElementById('category');
+  const children = category.children;
+  for (let i = 0; i < children.length; i++) {
+    children[i].className = '';
+  }
+  if (el) el.className = 'on';
+}
+
+function addEventHandle(target, type, callback) {
+  if (target.addEventListener) {
+    target.addEventListener(type, callback);
+  } else {
+    target.attachEvent('on' + type, callback);
+  }
+}
+
+
+/* ================= [기능 3] 외부 연동 및 유틸리티 ================= */
+let toastTimer;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+document.getElementById('btn').addEventListener('click', search);
+document.getElementById('q').addEventListener('keydown', e => e.key === 'Enter' && search());
+document.addEventListener('click', e => {
+  if (!e.target.closest('#panel') && !e.target.closest('#category')) {
+    document.getElementById('list').style.display = 'none';
+    if (infowindow) infowindow.close();
+    placeOverlay.setMap(null);
+  }
+});
+
+// AppInventor 앱 연동 확장 함수들
+window.AppInventor = {
+  // 1. 기존 검색어 입력 기능
+  setWebViewString(str) {
+    if (!str) return;
+    document.getElementById('q').value = str;
+    search();
+  },
+  // 2. [추가] 앱인벤터 GPS 센서값을 받아 강제로 중심점을 이동시키는 함수
+  moveCurrentLocation(lat, lng) {
+    if(!map) return;
+    const loc = new kakao.maps.LatLng(parseFloat(lat), parseFloat(lng));
+    map.setCenter(loc);
+    showToast('현재 위치로 이동했습니다');
+  }
+};
+
+(function loadSDK() {
+  const s = document.createElement('script');
+  s.src = `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${JS_KEY}&libraries=services&autoload=false`;
+  s.onload = () => kakao.maps.load(initMap);
+  s.onerror = () => showToast('지도 SDK 로드 실패');
+  document.head.appendChild(s);
+})();
+</script>
+</body>
+</html>
